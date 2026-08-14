@@ -1,0 +1,44 @@
+{
+  "name": "dsh-mcp-manager",
+  "version": "0.4.0",
+  "description": "MCP server manager for DeepSeek Harness: manage MCP servers from the Web settings page, stored globally in $DSH_HOME/mcp-servers.json, connected/disconnected at runtime.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.js.map",
+    "lib/client.js",
+    "lib/client.js.map",
+    "README.md",
+    "README.zh.md"
+  ],
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "prepare": "node scripts/build.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "mcp",
+    "deepseek-harness"
+  ],
+  "devDependencies": {
+    "@deepseek-ai/dsh-mcp-client": "0.1.0-rc.6",
+    "esbuild": "^0.25.0"
+  },
+  "license": "MIT"
+}

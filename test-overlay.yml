@@ -1,0 +1,5 @@
+# Test overlay: mount the mcp-manager plugin on a scratch web instance.
+# Used with: pnpm dsh web --port 3081 --patch ./dsh-mcp-manager/test-overlay.yml
+- insert:
+    - id: mcp-manager
+      name: dsh-mcp-manager
