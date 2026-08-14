@@ -30,10 +30,24 @@ dsh plugin --profile web add dsh-mcp-manager
 
 **方式二：源码安装：**
 
-1. 获取代码并构建：`git clone <仓库> && cd dsh-mcp-manager && npm install`（`prepare` 脚本会自动构建 `lib/`；使用带预构建 `lib/` 的发布包可跳过）。
+1. 克隆并构建：
+
+   ```sh
+   git clone https://github.com/Nichts0v0/dsh-mcp-manager.git
+   cd dsh-mcp-manager && npm install      # prepare 脚本会自动构建 lib/
+   ```
+
 2. 让 loader 能从 profile 解析该包（二选一）：
-   - 把整个 `dsh-mcp-manager/` 目录复制或软链接到 `$DSH_HOME/profiles/web/node_modules/`；或
-   - `dsh plugin --profile web add <仓库路径>`。
+   - **在包含克隆目录的父目录执行**（无需写绝对路径）：
+
+     ```sh
+     dsh plugin --profile web add ./dsh-mcp-manager
+     ```
+
+     > 注意：本包没有 `dsh.bundle` 层，`dsh plugin add` 只会把它作为普通 pnpm 依赖安装（保证可解析），**仍需第 3 步手动挂载插件行**。
+   - **或用软链接**把仓库目录本身链接到 profile 的 node_modules（不要直接复制整个仓库，会把开发用的 node_modules 也带进去）：
+     - Windows：`mklink /J "%DSH_HOME%\profiles\web\node_modules\dsh-mcp-manager" <克隆路径>` —— 把 `<克隆路径>` 换成你本地克隆的位置
+     - macOS/Linux：`ln -s <克隆路径> $DSH_HOME/profiles/web/node_modules/dsh-mcp-manager`
 
 **无论哪种方式，最后在 `$DSH_HOME/profiles/web/cordis.patch.yml` 挂载插件行：**
 

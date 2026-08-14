@@ -30,10 +30,24 @@ dsh plugin --profile web add dsh-mcp-manager
 
 **Option 2 — from source:**
 
-1. Get the code and build it: `git clone <repo> && cd dsh-mcp-manager && npm install` (the `prepare` script builds `lib/` automatically; releases with a prebuilt `lib/` skip this).
+1. Clone and build:
+
+   ```sh
+   git clone https://github.com/Nichts0v0/dsh-mcp-manager.git
+   cd dsh-mcp-manager && npm install      # the prepare script builds lib/ automatically
+   ```
+
 2. Make the package resolvable from the profile (pick one):
-   - copy or symlink the whole `dsh-mcp-manager/` folder into `$DSH_HOME/profiles/web/node_modules/`, or
-   - `dsh plugin --profile web add <path-to-repo>`.
+   - Run from the folder that contains the clone (no absolute path needed):
+
+     ```sh
+     dsh plugin --profile web add ./dsh-mcp-manager
+     ```
+
+     > This installs the package as a plain pnpm dependency (this package has no `dsh.bundle` layer), which only makes it resolvable — you still need step 3 to mount the plugin row.
+   - Or symlink the repository directory itself into the profile's `node_modules` (avoid copying, which would drag in dev `node_modules`):
+     - Windows: `mklink /J "%DSH_HOME%\profiles\web\node_modules\dsh-mcp-manager" <path-to-clone>` — replace `<path-to-clone>` with your local clone path
+     - macOS/Linux: `ln -s <path-to-clone> $DSH_HOME/profiles/web/node_modules/dsh-mcp-manager`
 
 **Then, whichever option — mount the plugin row** in `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
