@@ -1,6 +1,6 @@
 # dsh-mcp-manager
 
-[English](README.md) | [中文](README.zh.md)
+[English](README.md) | [中文](README.zh.md) · [![npm version](https://img.shields.io/npm/v/dsh-mcp-manager)](https://www.npmjs.com/package/dsh-mcp-manager) · [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 在 DeepSeek Harness 的 **Web 设置页**里直接管理 **MCP 服务器**——运行时添加、编辑、启用/停用、重连、删除，带实时状态、自动重连和配置文件热同步。
 
@@ -22,20 +22,28 @@
 
 ### 如果你是人类
 
+**方式一：npm 安装（最简单）：**
+
+```sh
+dsh plugin --profile web add dsh-mcp-manager
+```
+
+**方式二：源码安装：**
+
 1. 获取代码并构建：`git clone <仓库> && cd dsh-mcp-manager && npm install`（`prepare` 脚本会自动构建 `lib/`；使用带预构建 `lib/` 的发布包可跳过）。
 2. 让 loader 能从 profile 解析该包（二选一）：
    - 把整个 `dsh-mcp-manager/` 目录复制或软链接到 `$DSH_HOME/profiles/web/node_modules/`；或
    - `dsh plugin --profile web add <仓库路径>`。
-3. 在 `$DSH_HOME/profiles/web/cordis.patch.yml` 追加：
 
-   ```yaml
-   - insert:
-       - id: mcp-manager
-         name: dsh-mcp-manager
-   ```
+**无论哪种方式，最后在 `$DSH_HOME/profiles/web/cordis.patch.yml` 挂载插件行：**
 
-4. **重启 `dsh web`**，并强制刷新浏览器页面（`Ctrl+Shift+R`）以加载新的 `__DSH_BOOT__`。
-5. 打开 **设置 → MCP 服务器**，添加你的第一个服务器。
+```yaml
+- insert:
+    - id: mcp-manager
+      name: dsh-mcp-manager
+```
+
+**重启 `dsh web`**，并强制刷新浏览器页面（`Ctrl+Shift+R`）以加载新的 `__DSH_BOOT__`，然后打开 **设置 → MCP 服务器** 添加你的第一个服务器。
 
 > 注：Web 面的 `cordis.patch.yml` 热重载未启用（DSH 共享 HMR 行是关的），改配置后需重启。
 
@@ -44,9 +52,9 @@
 请按顺序执行，不要跳步：
 
 1. **通读本 README**（尤其是"功能简介"、"已知限制"和本节）。
-2. **按需构建**：在 `dsh-mcp-manager/` 下运行 `npm install --ignore-scripts && npm run build`（产出自包含的 `lib/index.js` + `lib/client.js`；插件运行时零依赖）。
-3. **链接到 profile**：在 `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager` 创建指向本仓库的目录 junction（Windows）或符号链接（POSIX），让 loader 能解析该包名。（也可用 `dsh plugin --profile <profile> add <路径>`。）
-4. **挂载插件行**：在 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 追加：
+2. **安装包**（优先 npm）：在目标 profile 下运行 `dsh plugin --profile <profile> add dsh-mcp-manager`（或在 `$DSH_HOME/profiles/<profile>` 下 `npm install dsh-mcp-manager`，再用下面的源码方式处理文件布局）。
+   - **源码兜底**：克隆本仓库 → `cd dsh-mcp-manager` → `npm install --ignore-scripts && npm run build`（产出自包含的 `lib/index.js` + `lib/client.js`，运行时零依赖）→ 把目录链接到 `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager`（Windows 用目录 junction，POSIX 用符号链接）。
+3. **挂载插件行**：在 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 追加：
 
    ```yaml
    - insert:
@@ -54,8 +62,8 @@
          name: dsh-mcp-manager
    ```
 
-5. **重启 `dsh web`**（Web 面配置热重载未启用），并提示用户**强制刷新浏览器**以看到设置页新入口。
-6. **验证**：`GET http://127.0.0.1:3080/mcp-manager/api/health` 应返回 `{"ok":true,"name":"mcp-manager","version":"<x.y.z>",...}`。
+4. **重启 `dsh web`**（Web 面配置热重载未启用），并提示用户**强制刷新浏览器**以看到设置页新入口。
+5. **验证**：`GET http://127.0.0.1:3080/mcp-manager/api/health` 应返回 `{"ok":true,"name":"mcp-manager","version":"<x.y.z>",...}`。
 
 ## 使用简介
 
@@ -114,6 +122,8 @@ npm install      # 仅构建期依赖；prepare 自动构建
 npm run build    # esbuild：lib/index.js（host，全内联）+ lib/client.js（浏览器）
 npm run watch    # 监听 client bundle（配合 dsh-client-hmr）
 ```
+
+**发布**：改 `package.json` 的 `version` 后运行 `npm publish`（`prepare` 脚本会在打包前自动构建 `lib/`；发布包含 `lib/`、两份 README 和 LICENSE）。
 
 运行时零依赖：host 半内联了 `@deepseek-ai/dsh-mcp-client`、MCP SDK 和 `cross-spawn`；浏览器半是 DSH 客户端模块系统托管的闭包工厂 bundle。
 

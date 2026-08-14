@@ -1,6 +1,6 @@
 # dsh-mcp-manager
 
-[English](README.md) | [中文](README.zh.md)
+[English](README.md) | [中文](README.zh.md) · [![npm version](https://img.shields.io/npm/v/dsh-mcp-manager)](https://www.npmjs.com/package/dsh-mcp-manager) · [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Manage **MCP servers** right from the DeepSeek Harness Web settings page — add, edit, enable/disable, reconnect and delete servers at runtime, with live status, automatic reconnect and config-file hot sync.
 
@@ -22,20 +22,28 @@ Manage **MCP servers** right from the DeepSeek Harness Web settings page — add
 
 ### For humans
 
+**Option 1 — from npm (easiest):**
+
+```sh
+dsh plugin --profile web add dsh-mcp-manager
+```
+
+**Option 2 — from source:**
+
 1. Get the code and build it: `git clone <repo> && cd dsh-mcp-manager && npm install` (the `prepare` script builds `lib/` automatically; releases with a prebuilt `lib/` skip this).
 2. Make the package resolvable from the profile (pick one):
    - copy or symlink the whole `dsh-mcp-manager/` folder into `$DSH_HOME/profiles/web/node_modules/`, or
    - `dsh plugin --profile web add <path-to-repo>`.
-3. Append to `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
-   ```yaml
-   - insert:
-       - id: mcp-manager
-         name: dsh-mcp-manager
-   ```
+**Then, whichever option — mount the plugin row** in `$DSH_HOME/profiles/web/cordis.patch.yml`:
 
-4. **Restart `dsh web`** and hard-refresh the browser page (`Ctrl+Shift+R`) so the new `__DSH_BOOT__` loads.
-5. Open **Settings → MCP Server Manager** and add your first server.
+```yaml
+- insert:
+    - id: mcp-manager
+      name: dsh-mcp-manager
+```
+
+**Restart `dsh web`** and hard-refresh the browser page (`Ctrl+Shift+R`) so the new `__DSH_BOOT__` loads, then open **Settings → MCP Server Manager** and add your first server.
 
 > Note: hot reload of `cordis.patch.yml` is disabled on the Web surface (DSH's shared HMR row is off), so configuration changes need a restart.
 
@@ -44,9 +52,9 @@ Manage **MCP servers** right from the DeepSeek Harness Web settings page — add
 Follow every step, in order:
 
 1. **Read this README in full** (especially *Features*, *Known limitations*, and this install section).
-2. **Build if needed**: from `dsh-mcp-manager/` run `npm install --ignore-scripts && npm run build` (produces self-contained `lib/index.js` + `lib/client.js`; the plugin has zero runtime dependencies).
-3. **Link into the profile**: create a directory junction (Windows) or symlink (POSIX) at `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager` pointing at this repository, so the loader can resolve the package name. (Alternatively: `dsh plugin --profile <profile> add <path>`.)
-4. **Mount the plugin row**: append to `$DSH_HOME/profiles/<profile>/cordis.patch.yml`:
+2. **Install the package** (npm is preferred): run `dsh plugin --profile <profile> add dsh-mcp-manager` in the profile you use (or `npm install dsh-mcp-manager` in `$DSH_HOME/profiles/<profile>` and use Option 2 below for the file layout).
+   - **Build/source fallback**: clone this repo, `cd dsh-mcp-manager`, run `npm install --ignore-scripts && npm run build` (produces self-contained `lib/index.js` + `lib/client.js`; zero runtime dependencies), then link the folder into `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager` (directory junction on Windows, symlink on POSIX).
+3. **Mount the plugin row**: append to `$DSH_HOME/profiles/<profile>/cordis.patch.yml`:
 
    ```yaml
    - insert:
@@ -54,8 +62,8 @@ Follow every step, in order:
          name: dsh-mcp-manager
    ```
 
-5. **Restart `dsh web`** (Web-surface config hot reload is disabled) and tell the user to **hard-refresh** the browser so the settings page shows the new section.
-6. **Verify**: `GET http://127.0.0.1:3080/mcp-manager/api/health` must return `{"ok":true,"name":"mcp-manager","version":"<x.y.z>",...}`.
+4. **Restart `dsh web`** (Web-surface config hot reload is disabled) and tell the user to **hard-refresh** the browser so the settings page shows the new section.
+5. **Verify**: `GET http://127.0.0.1:3080/mcp-manager/api/health` must return `{"ok":true,"name":"mcp-manager","version":"<x.y.z>",...}`.
 
 ## Usage
 
@@ -114,6 +122,8 @@ npm install      # build-only devDependencies; prepare auto-builds
 npm run build    # esbuild: lib/index.js (host, fully bundled) + lib/client.js (browser)
 npm run watch    # watch the client bundle (works with dsh-client-hmr)
 ```
+
+**Publishing**: bump `version` in `package.json`, then `npm publish` (the `prepare` script builds `lib/` automatically before packing; the package ships `lib/` + both READMEs + LICENSE).
 
 No runtime dependencies: the host half inlines `@deepseek-ai/dsh-mcp-client`, the MCP SDK and `cross-spawn`; the browser half is a closure-factory bundle served by DSH's client module system.
 
