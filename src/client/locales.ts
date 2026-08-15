@@ -56,6 +56,8 @@ export type LocaleKey =
   | 'updateFailed'
   | 'toggleFailed'
   | 'serverNameLocked'
+  | 'tokenLabel'
+  | 'tokenHint'
 
 /** Placeholders in template strings: `{n}`, `{name}` are replaced at render time. */
 export const zh: Record<LocaleKey, string> = {
@@ -107,6 +109,8 @@ export const zh: Record<LocaleKey, string> = {
   updateFailed: '更新服务器失败',
   toggleFailed: '切换启用状态失败',
   serverNameLocked: 'serverName 是服务器唯一标识，创建后不可修改',
+  tokenLabel: '访问令牌（可选）',
+  tokenHint: '若已在 mcp-servers.json 配置 "token"，请在此输入，所有请求会携带 Authorization: Bearer <token>；留空表示未配置令牌。',
 }
 
 export const en: Record<LocaleKey, string> = {
@@ -158,6 +162,8 @@ export const en: Record<LocaleKey, string> = {
   updateFailed: 'Failed to update server',
   toggleFailed: 'Failed to toggle enabled state',
   serverNameLocked: 'serverName is the server identity and cannot be changed after creation',
+  tokenLabel: 'Access token (optional)',
+  tokenHint: 'If "token" is set in mcp-servers.json, enter it here — every request then carries Authorization: Bearer <token>. Leave empty when no token is configured.',
 }
 
 /** Render a template string, replacing `{name}` / `{n}` placeholders. */

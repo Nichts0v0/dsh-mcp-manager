@@ -66,9 +66,17 @@ const POLL_INTERVAL_MS = 800
 const DEFAULT_WAIT_SECONDS = 15
 /** How long the delete button stays in its "确认删除？" state. */
 const DELETE_CONFIRM_MS = 3_000
+/** localStorage key for the optional access token entered by the user. */
+const TOKEN_STORAGE_KEY = 'mcpManager.accessToken'
+
+/** Current access token sent on every request ("" = none configured). */
+let accessToken = ''
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init)
+  const headers = new Headers(init?.headers)
+  headers.set('Content-Type', 'application/json')
+  if (accessToken !== '') headers.set('Authorization', `Bearer ${accessToken}`)
+  const response = await fetch(url, { ...init, headers })
   let body: { ok: boolean; error?: string } & T
   try {
     body = await response.json() as typeof body
@@ -226,6 +234,21 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
   const [args, setArgs] = useState('')
   const [headers, setHeaders] = useState('')
   const [waitSeconds, setWaitSeconds] = useState(DEFAULT_WAIT_SECONDS)
+
+  /** Optional access token, persisted locally so the settings page keeps working. */
+  const [token, setToken] = useState<string>(() => window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? '')
+
+  useEffect(() => {
+    accessToken = window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? ''
+  }, [])
+
+  const handleTokenChange = (value: string): void => {
+    const trimmed = value.trim()
+    setToken(trimmed)
+    accessToken = trimmed
+    if (trimmed === '') window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+    else window.localStorage.setItem(TOKEN_STORAGE_KEY, trimmed)
+  }
 
   const refresh = async (): Promise<void> => {
     setLoading(true)
@@ -390,6 +413,22 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
     <section style={sectionStyle}>
       <h2 style={{ marginBottom: 4, color: TOKENS.label }}>{t('title')}</h2>
       <p style={{ color: TOKENS.labelSecondary, fontSize: '13px', marginTop: 0 }}>{t('intro')}</p>
+
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap',
+        margin: '10px 0 14px', padding: '10px 12px', borderRadius: '8px',
+        border: `1px solid ${TOKENS.borderSubtle}`, background: TOKENS.bgForm, maxWidth: '720px',
+      }}>
+        <label style={{ fontSize: '13px', color: TOKENS.labelSecondary, whiteSpace: 'nowrap' }}>{t('tokenLabel')}</label>
+        <input
+          type="password"
+          style={{ ...inputStyle, maxWidth: '280px', flex: 1 }}
+          placeholder="Bearer <token>"
+          value={token}
+          onChange={e => handleTokenChange(e.target.value)}
+        />
+        <span style={{ fontSize: '12px', color: TOKENS.labelTertiary, flexBasis: '100%' }}>{t('tokenHint')}</span>
+      </div>
 
       {error !== undefined && (
         <p style={{

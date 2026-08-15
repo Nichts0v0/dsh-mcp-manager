@@ -14,6 +14,7 @@
  * @module dsh-mcp-manager
  */
 
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -56,6 +57,13 @@ export interface McpServerEntry {
 export interface StoredState {
   version: 1
   servers: McpServerEntry[]
+  /**
+   * Optional access token for the `/mcp-manager/*` API. When set, every
+   * request must carry `Authorization: Bearer <token>`. When unset and the
+   * web server binds to a non-loopback address, mutating requests are
+   * rejected (the audit-mitigating posture).
+   */
+  token?: string
 }
 
 const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
@@ -143,6 +151,40 @@ function toMcpConfig(entry: McpServerEntry): unknown {
 export function apply(ctx: Context): void {
   const path = storePath()
   const state = loadState(path)
+
+  /** Whether the web server is reachable beyond loopback (needs an access token). */
+  const exposed = ctx.webServer.host !== '127.0.0.1'
+  const hasToken = typeof state.token === 'string' && state.token !== ''
+
+  // ── access control for /mcp-manager/* ───────────────────────────────────────
+  // The API can start stdio servers (arbitrary commands), so it is gated:
+  //  - token configured → every request must present it;
+  //  - no token, loopback only → allowed (single-user local posture);
+  //  - no token, network-exposed → everything is rejected with a loud error.
+  function safeEqual(a: string, b: string): boolean {
+    const ha = createHash('sha256').update(a).digest()
+    const hb = createHash('sha256').update(b).digest()
+    return timingSafeEqual(ha, hb)
+  }
+
+  function isAuthorized(req: import('node:http').IncomingMessage): boolean {
+    if (hasToken) {
+      const header = req.headers.authorization
+      if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false
+      return safeEqual(header.slice('Bearer '.length), state.token as string)
+    }
+    return !exposed
+  }
+
+  function authError(): { status: number; message: string } {
+    if (exposed && !hasToken) {
+      return {
+        status: 403,
+        message: 'access denied: the web server is network-exposed and no access token is configured — set "token" in $DSH_HOME/mcp-servers.json, then restart',
+      }
+    }
+    return { status: 401, message: 'unauthorized: send "Authorization: Bearer <token>" (set "token" in $DSH_HOME/mcp-servers.json)' }
+  }
 
   /** serverName → live mcp-client fiber. */
   const fibers = new Map<string, Fiber>()
@@ -425,6 +467,11 @@ export function apply(ctx: Context): void {
         json(res, 404, { ok: false, error: 'not found' })
         return
       }
+      if (!isAuthorized(req)) {
+        const denied = authError()
+        json(res, denied.status, { ok: false, error: denied.message })
+        return
+      }
       const [action, serverName, sub] = parts.slice(2)
 
       if (req.method === 'GET' && action === 'health') {
@@ -620,4 +667,17 @@ export function apply(ctx: Context): void {
     })
   }
   ctx.logger.info(`mcp-manager: loaded ${state.servers.length} server(s) from ${path}`)
+  if (hasToken) {
+    ctx.logger.info('mcp-manager: access token configured — /mcp-manager/* requests require "Authorization: Bearer <token>"')
+  } else if (exposed) {
+    ctx.logger.error(
+      'mcp-manager: SECURITY — the web server is network-exposed (host 0.0.0.0) and no access token is set; '
+      + 'all /mcp-manager/* requests are rejected until you set "token" in mcp-servers.json (stdio servers execute arbitrary commands)',
+    )
+  } else {
+    ctx.logger.warn(
+      'mcp-manager: no access token configured — /mcp-manager/* is open on loopback only; '
+      + 'set "token" in mcp-servers.json before binding dsh to a non-loopback address',
+    )
+  }
 }

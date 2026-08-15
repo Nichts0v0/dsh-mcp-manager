@@ -129,6 +129,29 @@ The file is **watched live**: manual edits (add / remove / change / enable) take
 | DELETE | `/mcp-manager/api/servers/<name>` | disconnect & delete |
 | POST | `/mcp-manager/api/reload` | re-read the config file from disk |
 
+## Security
+
+The `/mcp-manager/*` API can start `stdio` servers — i.e. execute arbitrary commands — so it is access-controlled:
+
+- **Optional access token.** Set a top-level `token` in `$DSH_HOME/mcp-servers.json`:
+
+  ```json
+  { "version": 1, "token": "use-a-random-long-string", "servers": [] }
+  ```
+
+  Generate one with `node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`.
+  When set, **every** request must carry `Authorization: Bearer <token>` (all endpoints, including `health`):
+
+  ```sh
+  curl -H "Authorization: Bearer <token>" http://127.0.0.1:3080/mcp-manager/api/servers
+  ```
+
+  The settings page shows an "Access token" field — enter it there once (stored locally in the browser) and it is sent automatically.
+
+- **Network-exposure guard.** When `dsh web` binds to a non-loopback address (`--host 0.0.0.0`) **and no token is configured**, the manager logs a loud error and **rejects all `/mcp-manager/*` requests** (403) until a token is set and dsh is restarted. Loopback-only + no token stays fully open, matching the single-user local posture.
+- Token comparison is timing-safe (`crypto.timingSafeEqual`).
+- The token is stored in plaintext in `mcp-servers.json` — protect that file (same trust level as the DSH credentials store).
+
 ## Development
 
 ```sh
@@ -146,7 +169,7 @@ No runtime dependencies: the host half inlines `@deepseek-ai/dsh-mcp-client`, th
 - **Initial failure retries with backoff, not instantly** — `failOnStartupError` is on, so a failed first connect shows `error` and retries up to every 60 s; once connected, mcp-client's own reconnect handles drops.
 - **Reachability probing is HTTP-level** — a GET with a 2.5 s timeout for `streamable-http` servers (any HTTP response counts as reachable); `stdio` servers are not probed.
 - **Tools only** — MCP Resources/Prompts are not bridged (same as the official mcp-client).
-- **No auth on `/mcp-manager/*`** — loopback-only by default; be careful exposing `--host 0.0.0.0` (stdio servers execute arbitrary commands).
+- **Auth is token-only, loopback-by-default** — `/mcp-manager/*` has no built-in user accounts; use the optional `token` (see *Security*) before exposing `--host 0.0.0.0` (stdio servers execute arbitrary commands).
 - **Some MCP servers allow only one active client** (e.g. Godot MCP) — a second connection is rejected until the first is released.
 
 ## License

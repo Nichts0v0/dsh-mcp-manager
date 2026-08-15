@@ -129,6 +129,29 @@ dsh plugin --profile web add dsh-mcp-manager
 | DELETE | `/mcp-manager/api/servers/<name>` | 断开并删除 |
 | POST | `/mcp-manager/api/reload` | 从磁盘重新读取配置文件 |
 
+## 安全
+
+`/mcp-manager/*` API 可以启动 `stdio` 服务器——即执行任意命令——因此做了访问控制：
+
+- **可选访问令牌**。在 `$DSH_HOME/mcp-servers.json` 顶层设置 `token`：
+
+  ```json
+  { "version": 1, "token": "使用一长串随机字符", "servers": [] }
+  ```
+
+  生成：`node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"`。
+  配置后**所有**请求（含 `health`）都必须携带 `Authorization: Bearer <token>`：
+
+  ```sh
+  curl -H "Authorization: Bearer <token>" http://127.0.0.1:3080/mcp-manager/api/servers
+  ```
+
+  设置页顶部有"访问令牌"输入框——填入一次（保存在浏览器本地），之后自动附带。
+
+- **网络暴露防护**。当 `dsh web` 绑到非 loopback 地址（`--host 0.0.0.0`）**且未配置令牌**时，管理器会输出红色错误日志并**拒绝所有** `/mcp-manager/*` 请求（403），直到设置令牌并重启。仅 loopback + 无令牌保持全开，符合单用户本机定位。
+- 令牌比对使用常数时间比较（`crypto.timingSafeEqual`）。
+- 令牌明文存在 `mcp-servers.json`——请保护好该文件（信任级别同 DSH 凭据存储）。
+
 ## 开发
 
 ```sh
@@ -146,7 +169,7 @@ npm run watch    # 监听 client bundle（配合 dsh-client-hmr）
 - **初始失败是退避重试而非即时** — `failOnStartupError` 开启，首次连接失败显示 `error` 并最多每 60 秒重试一次；连接成功后由 mcp-client 自带重连处理断线。
 - **可达性探测是 HTTP 层** — 对 `streamable-http` 服务器发 GET（2.5 秒超时，任何 HTTP 响应都算可达）；`stdio` 服务器不探测。
 - **仅桥接 tools** — MCP Resources/Prompts 未桥接（与官方 mcp-client 一致）。
-- **`/mcp-manager/*` 无认证** — 默认仅 loopback；谨慎对外暴露 `--host 0.0.0.0`（stdio 服务器可执行任意命令）。
+- **鉴权只有令牌、默认仅 loopback** — `/mcp-manager/*` 没有用户体系；对外暴露 `--host 0.0.0.0` 前请先配置 `token`（见"安全"一节；stdio 服务器可执行任意命令）。
 - **部分 MCP 服务器只允许一个活动客户端**（如 Godot MCP）——第一连接未释放时，第二连接会被拒绝并报错。
 
 ## 许可证
