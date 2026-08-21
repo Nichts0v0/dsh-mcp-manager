@@ -22,6 +22,22 @@ import { useEffect, useRef, useState } from 'react'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { en, fmt, zh, type LocaleKey } from './locales.ts'
 
+export interface OAuthTokensView {
+  accessToken: string
+  tokenType?: string
+  refreshToken?: string
+  expiresAt?: number
+  scope?: string
+}
+
+export interface McpServerOAuthConfigView {
+  clientId?: string
+  clientSecret?: string
+  scopes?: string[]
+  authorizationServerUrl?: string
+  tokens?: OAuthTokensView
+}
+
 export interface McpServerView {
   serverName: string
   transport: 'stdio' | 'streamable-http'
@@ -37,6 +53,8 @@ export interface McpServerView {
   status?: string
   toolCount?: number
   error?: string
+  authType?: 'none' | 'oauth'
+  oauth?: McpServerOAuthConfigView
 }
 
 export interface McpManagerSectionInjected {
@@ -224,7 +242,7 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
   /** Server currently being edited (null = the form is in add mode). */
   const [editing, setEditing] = useState<McpServerView | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const deleteTimer = useRef<number>()
+  const deleteTimer = useRef<number | undefined>(undefined)
 
   // form fields
   const [serverName, setServerName] = useState('')
@@ -234,6 +252,13 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
   const [args, setArgs] = useState('')
   const [headers, setHeaders] = useState('')
   const [waitSeconds, setWaitSeconds] = useState(DEFAULT_WAIT_SECONDS)
+
+  // OAuth form states
+  const [authType, setAuthType] = useState<'none' | 'oauth'>('none')
+  const [oauthClientId, setOauthClientId] = useState('')
+  const [oauthScopes, setOauthScopes] = useState('')
+  const [oauthAuthorizing, setOauthAuthorizing] = useState(false)
+  const [oauthMsg, setOauthMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   /** Optional access token, persisted locally so the settings page keeps working. */
   const [token, setToken] = useState<string>(() => window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? '')
@@ -268,6 +293,30 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
   // Clear the delete-confirm timer when the component unmounts.
   useEffect(() => () => { if (deleteTimer.current !== undefined) window.clearTimeout(deleteTimer.current) }, [])
 
+  // Listen for OAuth popup completion
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data
+      if (data && typeof data === 'object') {
+        if (data.type === 'mcp-oauth-success') {
+          setOauthAuthorizing(false)
+          setOauthMsg({ type: 'ok', text: t('oauthSuccessMsg') })
+          void refresh()
+          if (editing && editing.serverName === data.serverName) {
+            void request<{ server: McpServerView }>(`${API}/servers/${data.serverName}`).then(res => {
+              if (res.server) setEditing(res.server)
+            }).catch(() => {})
+          }
+        } else if (data.type === 'mcp-oauth-error') {
+          setOauthAuthorizing(false)
+          setOauthMsg({ type: 'err', text: fmt(t('oauthFailedMsg'), { error: data.error || 'Unknown error' }) })
+        }
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [t, editing])
+
   /** Run an action, then poll until the connection settles or the wait times out, and refresh. */
   const runWithPoll = async (busyKey: string, action: () => Promise<void>): Promise<void> => {
     setBusy(busyKey)
@@ -290,6 +339,7 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
 
   const resetForm = (): void => {
     setServerName(''); setUrl(''); setCommand(''); setArgs(''); setHeaders(''); setTransport('streamable-http')
+    setAuthType('none'); setOauthClientId(''); setOauthScopes(''); setOauthAuthorizing(false); setOauthMsg(null)
   }
 
   const openAddForm = (): void => {
@@ -306,6 +356,10 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
     setCommand(server.command ?? '')
     setArgs((server.args ?? []).join(' '))
     setHeaders(server.headers !== undefined ? JSON.stringify(server.headers, null, 2) : '')
+    setAuthType(server.authType ?? 'none')
+    setOauthClientId(server.oauth?.clientId ?? '')
+    setOauthScopes((server.oauth?.scopes ?? []).join(' '))
+    setOauthMsg(null)
     setConfirmingDelete(false)
     setView('form')
   }
@@ -324,7 +378,14 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
     }
     if (transport === 'streamable-http') {
       entry.url = url.trim()
-      if (headers.trim() !== '') {
+      entry.authType = authType
+      if (authType === 'oauth') {
+        entry.oauth = {
+          ...(editing?.oauth ?? {}),
+          clientId: oauthClientId.trim() || undefined,
+          scopes: oauthScopes.split(/\s+/).filter(Boolean),
+        }
+      } else if (headers.trim() !== '') {
         try {
           entry.headers = JSON.parse(headers) as Record<string, string>
         } catch {
@@ -346,6 +407,69 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
         await add(entry)
         closeForm()
       })
+    }
+  }
+
+  const startOAuthFlow = async (): Promise<void> => {
+    const targetServerName = (editing?.serverName ?? serverName).trim()
+    const targetUrl = url.trim()
+    if (!targetServerName) {
+      setError(t('addFailed') + ': serverName is required')
+      return
+    }
+    if (!targetUrl) {
+      setError(t('addFailed') + ': URL is required')
+      return
+    }
+    setOauthAuthorizing(true)
+    setOauthMsg(null)
+    setError(undefined)
+
+    try {
+      const res = await request<{ ok: boolean; authorizationUrl: string; state: string }>(`${API}/oauth/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          serverName: targetServerName,
+          url: targetUrl,
+          clientId: oauthClientId.trim() || undefined,
+          scopes: oauthScopes.split(/\s+/).filter(Boolean),
+        }),
+      })
+
+      if (res.authorizationUrl) {
+        const width = 600
+        const height = 700
+        const left = window.screenX + (window.outerWidth - width) / 2
+        const top = window.screenY + (window.outerHeight - height) / 2
+        window.open(
+          res.authorizationUrl,
+          'mcp_oauth_window',
+          `width=${width},height=${height},left=${left},top=${top},status=no,menubar=no,toolbar=no`,
+        )
+      }
+    } catch (err) {
+      setOauthAuthorizing(false)
+      setOauthMsg({ type: 'err', text: fmt(t('oauthFailedMsg'), { error: err instanceof Error ? err.message : String(err) }) })
+    }
+  }
+
+  const revokeOAuth = async (targetServerName: string): Promise<void> => {
+    setBusy(targetServerName)
+    try {
+      await request(`${API}/oauth/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverName: targetServerName }),
+      })
+      if (editing && editing.serverName === targetServerName) {
+        setEditing({ ...editing, oauth: undefined })
+      }
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(undefined)
     }
   }
 
@@ -408,6 +532,8 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
       default: return server.status ?? t('unknown')
     }
   }
+
+  const currentOAuthTokens = editing?.oauth?.tokens
 
   return (
     <section style={sectionStyle}>
@@ -499,15 +625,117 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
             </div>
 
             {transport === 'streamable-http' ? (
-              <div style={fieldRowStyle}>
-                <label style={fieldLabelStyle}>{t('fieldUrl')}</label>
-                <input
-                  style={inputStyle}
-                  placeholder="http://127.0.0.1:8080/mcp"
-                  value={url}
-                  onChange={e => setUrl(e.target.value)}
-                />
-              </div>
+              <>
+                <div style={fieldRowStyle}>
+                  <label style={fieldLabelStyle}>{t('fieldUrl')}</label>
+                  <input
+                    style={inputStyle}
+                    placeholder="http://127.0.0.1:8080/mcp"
+                    value={url}
+                    onChange={e => setUrl(e.target.value)}
+                  />
+                </div>
+
+                <div style={fieldRowStyle}>
+                  <label style={fieldLabelStyle}>{t('authType')}</label>
+                  <select
+                    style={{ ...inputStyle, maxWidth: '260px' }}
+                    value={authType}
+                    onChange={e => setAuthType(e.target.value as 'none' | 'oauth')}
+                  >
+                    <option value="none">{t('authTypeNone')}</option>
+                    <option value="oauth">{t('authTypeOAuth')}</option>
+                  </select>
+                </div>
+
+                {authType === 'oauth' ? (
+                  <div style={{
+                    padding: '12px 14px', borderRadius: '6px', border: `1px solid ${tint(TOKENS.business, 30)}`,
+                    background: tint(TOKENS.business, 6), margin: '8px 0 12px',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px', marginBottom: '10px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 500, color: TOKENS.label }}>{t('oauthStatus')}:</span>
+                      {currentOAuthTokens?.accessToken ? (
+                        <span style={{ ...badgeStyle('connected'), display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                          <span>●</span>
+                          {t('oauthAuthorized')}
+                          {currentOAuthTokens.expiresAt ? ` (${fmt(t('oauthExpiresAt'), { time: new Date(currentOAuthTokens.expiresAt).toLocaleTimeString() })})` : ''}
+                        </span>
+                      ) : (
+                        <span style={badgeStyle('disabled')}>{t('oauthNotAuthorized')}</span>
+                      )}
+                    </div>
+
+                    {oauthMsg && (
+                      <div style={{
+                        padding: '8px 10px', borderRadius: '4px', fontSize: '12px', marginBottom: '10px',
+                        background: oauthMsg.type === 'ok' ? tint(TOKENS.success, 15) : tint(TOKENS.error, 15),
+                        color: oauthMsg.type === 'ok' ? TOKENS.success : TOKENS.error,
+                      }}>
+                        {oauthMsg.text}
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                      <button
+                        type="button"
+                        style={{
+                          ...btnStyle, background: TOKENS.business, color: '#fff', borderColor: TOKENS.business,
+                          fontWeight: 500,
+                        }}
+                        disabled={oauthAuthorizing}
+                        onClick={() => void startOAuthFlow()}
+                      >
+                        {oauthAuthorizing ? t('oauthAuthorizing') : t('oauthAuthorizeBtn')}
+                      </button>
+
+                      {currentOAuthTokens?.accessToken && (
+                        <button
+                          type="button"
+                          style={{ ...btnStyle, color: TOKENS.error, borderColor: tint(TOKENS.error, 40) }}
+                          disabled={busy === (editing?.serverName ?? serverName)}
+                          onClick={() => void revokeOAuth(editing?.serverName ?? serverName)}
+                        >
+                          {t('oauthRevokeBtn')}
+                        </button>
+                      )}
+                    </div>
+
+                    <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: `1px dashed ${tint(TOKENS.border, 50)}` }}>
+                      <div style={fieldRowStyle}>
+                        <label style={{ ...fieldLabelStyle, fontSize: '12px' }}>{t('oauthClientId')}</label>
+                        <input
+                          style={{ ...inputStyle, fontSize: '12px' }}
+                          placeholder="client-id-123"
+                          value={oauthClientId}
+                          onChange={e => setOauthClientId(e.target.value)}
+                        />
+                        <span style={{ fontSize: '11px', color: TOKENS.labelTertiary, width: '100%' }}>{t('oauthClientIdHint')}</span>
+                      </div>
+                      <div style={fieldRowStyle}>
+                        <label style={{ ...fieldLabelStyle, fontSize: '12px' }}>{t('oauthScopes')}</label>
+                        <input
+                          style={{ ...inputStyle, fontSize: '12px' }}
+                          placeholder="read write"
+                          value={oauthScopes}
+                          onChange={e => setOauthScopes(e.target.value)}
+                        />
+                        <span style={{ fontSize: '11px', color: TOKENS.labelTertiary, width: '100%' }}>{t('oauthScopesHint')}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={fieldRowStyle}>
+                    <label style={fieldLabelStyle}>{t('fieldHeaders')}</label>
+                    <textarea
+                      style={{ ...inputStyle, minHeight: '48px', resize: 'vertical', fontFamily: 'monospace' }}
+                      placeholder='{"Authorization": "Bearer <token>"}'
+                      value={headers}
+                      onChange={e => setHeaders(e.target.value)}
+                    />
+                  </div>
+                )}
+              </>
             ) : (
               <>
                 <div style={fieldRowStyle}>
@@ -528,18 +756,17 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
                     onChange={e => setArgs(e.target.value)}
                   />
                 </div>
+                <div style={fieldRowStyle}>
+                  <label style={fieldLabelStyle}>{t('fieldHeaders')}</label>
+                  <textarea
+                    style={{ ...inputStyle, minHeight: '48px', resize: 'vertical', fontFamily: 'monospace' }}
+                    placeholder='{"Authorization": "Bearer <token>"}'
+                    value={headers}
+                    onChange={e => setHeaders(e.target.value)}
+                  />
+                </div>
               </>
             )}
-
-            <div style={fieldRowStyle}>
-              <label style={fieldLabelStyle}>{t('fieldHeaders')}</label>
-              <textarea
-                style={{ ...inputStyle, minHeight: '48px', resize: 'vertical', fontFamily: 'monospace' }}
-                placeholder='{"Authorization": "Bearer <token>"}'
-                value={headers}
-                onChange={e => setHeaders(e.target.value)}
-              />
-            </div>
 
             <div style={fieldRowStyle}>
               <label style={fieldLabelStyle}>{t('fieldTimeout')}</label>
@@ -577,11 +804,22 @@ export function McpManagerSection({ list, add, update, setEnabled, remove, recon
             <div>
               {servers.map(server => {
                 const disabled = server.enabled === false
+                const isOAuth = server.authType === 'oauth'
+                const hasOAuthToken = Boolean(server.oauth?.tokens?.accessToken)
                 return (
                   <div key={server.serverName} style={{ ...serverCardStyle, opacity: disabled ? 0.62 : 1 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: '15px', color: TOKENS.label }}>{server.serverName}</strong>
                       <span style={transportBadgeStyle}>{transportLabel(server.transport)}</span>
+                      {isOAuth && (
+                        <span style={{
+                          ...transportBadgeStyle,
+                          background: hasOAuthToken ? tint(TOKENS.success, 15) : tint(TOKENS.business, 15),
+                          color: hasOAuthToken ? TOKENS.success : TOKENS.business,
+                        }}>
+                          OAuth {hasOAuthToken ? '✓' : '...'}
+                        </span>
+                      )}
                       <span style={{ marginLeft: 'auto' }}>
                         <span style={badgeStyle(server.status ?? 'unknown')}>{statusText(server)}</span>
                       </span>

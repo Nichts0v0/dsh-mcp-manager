@@ -7,6 +7,7 @@
 ## 功能简介
 
 - **Web 设置页 UI** — 独立的"MCP 服务器管理"页面：服务器卡片（实时状态）、添加/编辑表单、两步确认的删除保护。
+- **OAuth 2.0 / RFC 9728 认证支持** — 原生支持 MCP OAuth 2.1 规范与 PKCE，自动发现认证元数据、浏览器授权登录、令牌自动刷新与凭证管理。
 - **运行时连接** — 服务器即时连接/断开；工具以 `mcp__<serverName>__<tool>` 全局注册，所有会话的 agent 都能调用。
 - **实时状态** — 可达性探测让关闭的服务器显示 **离线** 而不是陈旧的"已连接"；卡住的连接 30 秒后判为超时。
 - **自动重连** — 初始连接失败按指数退避重试（3s → 60s）；点"刷新"立即重试一次。
@@ -83,12 +84,13 @@ dsh plugin --profile web add dsh-mcp-manager
 
 打开 **设置 → MCP 服务器**：
 
-- **服务器卡片**：显示名称、传输方式、状态徽章和端点；停用的卡片变灰。
+- **服务器卡片**：显示名称、传输方式、状态徽章、端点与 `OAuth` 标记；停用的卡片变灰。
 - **启用/停用开关**：停用立即断开并卸载该服务器的工具。
 - **重连**：自动等待连接结果并刷新（等待时间可配置，默认 15 秒）。
-- **编辑**：可改传输方式 / URL / 命令 / Headers（`serverName` 不可修改）；保存后原地热更新连接。
+- **编辑**：可改传输方式 / URL / 命令 / Headers / OAuth 设置（`serverName` 不可修改）；保存后原地热更新连接。
+- **OAuth 授权**：对于需要认证的 `streamable-http` 服务，选择 `OAuth 2.0`，点击 **授权登录 (OAuth)** 弹窗完成登录，并支持随时撤销/清除授权。
 - **删除**：位于编辑页顶部，两步确认（3 秒窗口）。
-- **添加**：`streamable-http`（URL + 可选 Headers）或 `stdio`（命令 + 参数），可设连接等待超时。
+- **添加**：`streamable-http`（URL + 可选 Headers 或 OAuth 2.0）或 `stdio`（命令 + 参数），可设连接等待超时。
 
 ### 状态说明
 
@@ -108,7 +110,28 @@ dsh plugin --profile web add dsh-mcp-manager
 {
   "version": 1,
   "servers": [
-    { "serverName": "my-server", "transport": "streamable-http", "url": "http://127.0.0.1:8080/mcp", "enabled": true }
+    {
+      "serverName": "my-http-server",
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "enabled": true
+    },
+    {
+      "serverName": "my-oauth-server",
+      "transport": "streamable-http",
+      "url": "https://api.example.com/mcp",
+      "authType": "oauth",
+      "enabled": true,
+      "oauth": {
+        "clientId": "client-id-123",
+        "scopes": ["read", "write"],
+        "tokens": {
+          "accessToken": "secret_access_token",
+          "refreshToken": "secret_refresh_token",
+          "expiresAt": 1787304425000
+        }
+      }
+    }
   ]
 }
 ```
@@ -128,6 +151,10 @@ dsh plugin --profile web add dsh-mcp-manager
 | POST | `/mcp-manager/api/servers/<name>/reconnect` | 断开后重连 |
 | DELETE | `/mcp-manager/api/servers/<name>` | 断开并删除 |
 | POST | `/mcp-manager/api/reload` | 从磁盘重新读取配置文件 |
+| POST | `/mcp-manager/api/oauth/discover` | 探测 MCP 服务的 RFC 9728 OAuth 元数据 |
+| POST | `/mcp-manager/api/oauth/start` | 生成用于浏览器登录的 PKCE 授权链接 |
+| GET | `/mcp-manager/api/oauth/callback` | OAuth 重定向回调与令牌交换 |
+| POST | `/mcp-manager/api/oauth/revoke` | 清除已保存的凭据并断开连接 |
 
 ## 安全
 

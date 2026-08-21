@@ -14,18 +14,48 @@
  * @module dsh-mcp-manager
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, unwatchFile, watchFile, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { apply as mcpClientApply } from '@deepseek-ai/dsh-mcp-client'
+import {
+  discoverOAuthServerInfo,
+  startAuthorization,
+  exchangeAuthorization,
+  refreshAuthorization,
+} from '@modelcontextprotocol/sdk/client/auth.js'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    webServer: any
+  }
+}
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-manager'
 
 /** Required host services. */
 export const inject = ['tools', 'webServer']
+
+/** OAuth tokens persisted for a server. */
+export interface OAuthTokens {
+  accessToken: string
+  tokenType?: string
+  refreshToken?: string
+  expiresAt?: number
+  scope?: string
+}
+
+/** OAuth configuration attached to an MCP server entry. */
+export interface McpServerOAuthConfig {
+  clientId?: string
+  clientSecret?: string
+  scopes?: string[]
+  authorizationServerUrl?: string
+  tokens?: OAuthTokens
+}
 
 /** One configured MCP server (a slim superset of the mcp-client Config). */
 export interface McpServerEntry {
@@ -51,6 +81,10 @@ export interface McpServerEntry {
   failOnStartupError?: boolean
   /** Whether this server should be connected. Disabled servers stay disconnected. */
   enabled?: boolean
+  /** Authentication mode: 'none' (or static headers) | 'oauth'. */
+  authType?: 'none' | 'oauth'
+  /** OAuth 2.0 / MCP spec configuration and tokens. */
+  oauth?: McpServerOAuthConfig
 }
 
 /** The persisted file shape. */
@@ -127,7 +161,7 @@ function saveState(path: string, state: StoredState): void {
 }
 
 /** Project the manager entry onto the mcp-client Config shape. */
-function toMcpConfig(entry: McpServerEntry): unknown {
+function toMcpConfig(entry: McpServerEntry, resolvedHeaders?: Record<string, string>): unknown {
   const base = {
     serverName: entry.serverName,
     transport: entry.transport,
@@ -141,7 +175,16 @@ function toMcpConfig(entry: McpServerEntry): unknown {
   }
   return entry.transport === 'stdio'
     ? { ...base, command: entry.command, args: entry.args, env: entry.env, cwd: entry.cwd }
-    : { ...base, url: entry.url, headers: entry.headers }
+    : { ...base, url: entry.url, headers: resolvedHeaders ?? entry.headers }
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
 /**
@@ -157,10 +200,6 @@ export function apply(ctx: Context): void {
   const hasToken = typeof state.token === 'string' && state.token !== ''
 
   // ── access control for /mcp-manager/* ───────────────────────────────────────
-  // The API can start stdio servers (arbitrary commands), so it is gated:
-  //  - token configured → every request must present it;
-  //  - no token, loopback only → allowed (single-user local posture);
-  //  - no token, network-exposed → everything is rejected with a loud error.
   function safeEqual(a: string, b: string): boolean {
     const ha = createHash('sha256').update(a).digest()
     const hb = createHash('sha256').update(b).digest()
@@ -201,6 +240,53 @@ export function apply(ctx: Context): void {
   /** serverName → last connect attempt timestamp (throttles refresh-triggered retries). */
   const lastAttempt = new Map<string, number>()
 
+  /** Pending OAuth authorization sessions keyed by state. */
+  interface PendingOAuthSession {
+    state: string
+    serverName: string
+    url: string
+    codeVerifier: string
+    redirectUri: string
+    authorizationServerUrl: string
+    metadata?: any
+    clientInformation: { client_id: string; client_secret?: string }
+    createdAt: number
+  }
+  const pendingOAuthSessions = new Map<string, PendingOAuthSession>()
+
+  /** Resolve dynamic headers for an entry (e.g. injecting or refreshing OAuth access tokens). */
+  async function resolveEntryHeaders(entry: McpServerEntry, onSave?: () => void): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { ...(entry.headers ?? {}) }
+    if (entry.authType === 'oauth' && entry.oauth?.tokens?.accessToken) {
+      const tokens = entry.oauth.tokens
+      // Refresh token automatically if expiring within 60 seconds
+      if (tokens.refreshToken && tokens.expiresAt && Date.now() > tokens.expiresAt - 60_000) {
+        try {
+          const authServerUrl = entry.oauth.authorizationServerUrl || entry.url || ''
+          if (authServerUrl) {
+            const refreshed = await refreshAuthorization(authServerUrl, {
+              clientInformation: {
+                client_id: entry.oauth.clientId || 'dsh-mcp-manager',
+                client_secret: entry.oauth.clientSecret,
+              },
+              refreshToken: tokens.refreshToken,
+            })
+            if (refreshed.access_token) {
+              tokens.accessToken = refreshed.access_token
+              if (refreshed.refresh_token) tokens.refreshToken = refreshed.refresh_token
+              if (refreshed.expires_in) tokens.expiresAt = Date.now() + refreshed.expires_in * 1000
+              if (onSave) onSave()
+            }
+          }
+        } catch (err) {
+          ctx.logger.warn(`mcp-manager: token refresh failed for "${entry.serverName}": ${String(err)}`)
+        }
+      }
+      headers['Authorization'] = `Bearer ${tokens.accessToken}`
+    }
+    return headers
+  }
+
   /** Serialize per-server mutations: each op waits for the previous one to finish. */
   function enqueue<T>(serverName: string, fn: () => Promise<T>): Promise<T> {
     const prev = queues.get(serverName) ?? Promise.resolve()
@@ -236,14 +322,20 @@ export function apply(ctx: Context): void {
     lastAttempt.set(entry.serverName, Date.now())
     errors.delete(entry.serverName)
     connectingSince.set(entry.serverName, Date.now())
-    const fiber = ctx.plugin(mcpClientApply, toMcpConfig(entry))
+
+    // If OAuth is configured but no access token is available, mark as error/awaiting auth
+    if (entry.authType === 'oauth' && !entry.oauth?.tokens?.accessToken) {
+      errors.set(entry.serverName, '需要 OAuth 授权登录：请在配置中完成授权')
+      connectingSince.delete(entry.serverName)
+      return
+    }
+
+    const resolvedHeaders = await resolveEntryHeaders(entry, () => saveState(path, state))
+    const fiber = ctx.plugin(mcpClientApply, toMcpConfig(entry, resolvedHeaders) as any)
     fibers.set(entry.serverName, fiber)
     try {
       await fiber
     } catch (err) {
-      // The fiber failed (failOnStartupError) and is disposed by the loader;
-      // drop it from the live map and record the failure, then keep retrying
-      // with backoff so the server can recover without a dsh restart.
       fibers.delete(entry.serverName)
       const cause = (err as { cause?: unknown } | null)?.cause
       const message = err instanceof Error ? err.message : String(err)
@@ -316,9 +408,13 @@ export function apply(ctx: Context): void {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
     try {
+      const probeHeaders: Record<string, string> = { Accept: 'application/json', ...(entry.headers ?? {}) }
+      if (entry.authType === 'oauth' && entry.oauth?.tokens?.accessToken) {
+        probeHeaders['Authorization'] = `Bearer ${entry.oauth.tokens.accessToken}`
+      }
       const res = await fetch(entry.url, {
         method: 'GET',
-        headers: { Accept: 'application/json', ...(entry.headers ?? {}) },
+        headers: probeHeaders,
         signal: controller.signal,
         redirect: 'manual',
       })
@@ -467,12 +563,145 @@ export function apply(ctx: Context): void {
         json(res, 404, { ok: false, error: 'not found' })
         return
       }
+
+      const [action, serverName, sub] = parts.slice(2)
+
+      // OAuth callback is loaded directly by user browser redirect, bypass standard token check
+      if (req.method === 'GET' && action === 'oauth' && serverName === 'callback') {
+        const code = url.searchParams.get('code')
+        const stateVal = url.searchParams.get('state')
+        const errorParam = url.searchParams.get('error')
+        const errorDescription = url.searchParams.get('error_description')
+
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'text/html; charset=utf-8')
+
+        if (errorParam || !code || !stateVal) {
+          const errMsg = errorDescription || errorParam || 'Missing code or state parameter'
+          res.end(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>OAuth Authorization Failed</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#18181b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:32px;border-radius:12px;max-width:480px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.5)}.err{color:#ef4444;margin-top:12px}</style></head>
+<body>
+  <div class="card">
+    <h2>❌ 授权失败 (Authorization Failed)</h2>
+    <div class="err">${escapeHtml(errMsg)}</div>
+    <p style="margin-top:24px;color:#a1a1aa;font-size:13px">窗口将在 5 秒后自动关闭…</p>
+  </div>
+  <script>
+    if (window.opener) {
+      window.opener.postMessage({ type: 'mcp-oauth-error', error: ${JSON.stringify(errMsg)} }, '*');
+    }
+    setTimeout(() => window.close(), 5000);
+  </script>
+</body>
+</html>`)
+          return
+        }
+
+        const session = pendingOAuthSessions.get(stateVal)
+        if (!session) {
+          res.end(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>OAuth Session Expired</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#18181b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:32px;border-radius:12px;max-width:480px;text-align:center}</style></head>
+<body>
+  <div class="card">
+    <h2>⚠️ 会话已过期 (Session Expired)</h2>
+    <p style="color:#a1a1aa">请返回 MCP 管理面板重新点击授权。</p>
+  </div>
+  <script>setTimeout(() => window.close(), 3000);</script>
+</body>
+</html>`)
+          return
+        }
+
+        pendingOAuthSessions.delete(stateVal)
+
+        try {
+          const tokens = await exchangeAuthorization(session.authorizationServerUrl, {
+            metadata: session.metadata,
+            clientInformation: session.clientInformation,
+            authorizationCode: code,
+            codeVerifier: session.codeVerifier,
+            redirectUri: session.redirectUri,
+          })
+
+          let entry = findEntry(session.serverName)
+          if (!entry) {
+            entry = {
+              serverName: session.serverName,
+              transport: 'streamable-http',
+              url: session.url,
+              authType: 'oauth',
+              enabled: true,
+            }
+            state.servers.push(entry)
+          }
+          entry.authType = 'oauth'
+          entry.oauth = {
+            ...(entry.oauth ?? {}),
+            clientId: session.clientInformation.client_id,
+            clientSecret: session.clientInformation.client_secret,
+            authorizationServerUrl: session.authorizationServerUrl,
+            tokens: {
+              accessToken: tokens.access_token,
+              refreshToken: tokens.refresh_token,
+              expiresAt: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
+              tokenType: tokens.token_type,
+              scope: tokens.scope,
+            },
+          }
+          saveState(path, state)
+
+          // Reconnect server immediately with the newly acquired token
+          void enqueue(entry.serverName, async () => {
+            await disconnectNow(entry.serverName)
+            await connectNow(entry)
+          })
+
+          res.end(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>OAuth Authorized</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#18181b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:32px;border-radius:12px;max-width:480px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.5)}.ok{color:#10b981;font-size:20px;font-weight:600}</style></head>
+<body>
+  <div class="card">
+    <div class="ok">🎉 授权成功！(Authorized)</div>
+    <p style="color:#a1a1aa;margin-top:12px">服务器 <b>${escapeHtml(session.serverName)}</b> 授权完成，已保存令牌并正在建立连接…</p>
+    <p style="margin-top:20px;color:#71717a;font-size:12px">该窗口将在 1.5 秒后自动关闭。</p>
+  </div>
+  <script>
+    if (window.opener) {
+      window.opener.postMessage({ type: 'mcp-oauth-success', serverName: ${JSON.stringify(session.serverName)} }, '*');
+    }
+    setTimeout(() => window.close(), 1500);
+  </script>
+</body>
+</html>`)
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err)
+          res.end(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>OAuth Exchange Failed</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#18181b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.card{background:#27272a;padding:32px;border-radius:12px;max-width:480px;text-align:center}</style></head>
+<body>
+  <div class="card">
+    <h2>❌ 交换令牌失败 (Token Exchange Failed)</h2>
+    <p style="color:#ef4444">${escapeHtml(errMsg)}</p>
+  </div>
+  <script>
+    if (window.opener) {
+      window.opener.postMessage({ type: 'mcp-oauth-error', error: ${JSON.stringify(errMsg)} }, '*');
+    }
+    setTimeout(() => window.close(), 4000);
+  </script>
+</body>
+</html>`)
+        }
+        return
+      }
+
       if (!isAuthorized(req)) {
         const denied = authError()
         json(res, denied.status, { ok: false, error: denied.message })
         return
       }
-      const [action, serverName, sub] = parts.slice(2)
 
       if (req.method === 'GET' && action === 'health') {
         json(res, 200, { ok: true, name, version: VERSION, storePath: path })
@@ -483,6 +712,110 @@ export function apply(ctx: Context): void {
         await reloadFromDisk()
         json(res, 200, { ok: true, servers: state.servers.length })
         return
+      }
+
+      // ── OAuth Management Endpoints ──────────────────────────────────────────
+      if (req.method === 'POST' && action === 'oauth') {
+        if (serverName === 'discover') {
+          const body = JSON.parse(await readBody(req)) as { url?: string }
+          if (!body.url) {
+            json(res, 400, { ok: false, error: 'url is required' })
+            return
+          }
+          try {
+            const info = await discoverOAuthServerInfo(body.url)
+            json(res, 200, {
+              ok: true,
+              authorizationServerUrl: info.authorizationServerUrl,
+              supportsOAuth: Boolean(info.authorizationServerMetadata || info.resourceMetadata),
+              metadata: info.authorizationServerMetadata,
+            })
+          } catch (err) {
+            json(res, 200, { ok: true, supportsOAuth: false, error: String(err) })
+          }
+          return
+        }
+
+        if (serverName === 'start') {
+          const body = JSON.parse(await readBody(req)) as {
+            serverName: string
+            url?: string
+            clientId?: string
+            clientSecret?: string
+            scopes?: string[]
+            redirectUri?: string
+          }
+          const entry = findEntry(body.serverName)
+          const targetUrl = body.url || entry?.url
+          if (!targetUrl) {
+            json(res, 400, { ok: false, error: 'url or valid serverName is required' })
+            return
+          }
+
+          const serverInfo = await discoverOAuthServerInfo(targetUrl).catch(() => ({
+            authorizationServerUrl: targetUrl,
+            authorizationServerMetadata: undefined,
+            resourceMetadata: undefined,
+          }))
+
+          const authServerUrl = serverInfo.authorizationServerUrl || targetUrl
+          const clientId = body.clientId || entry?.oauth?.clientId || 'dsh-mcp-manager'
+          const clientInformation = {
+            client_id: clientId,
+            client_secret: body.clientSecret || entry?.oauth?.clientSecret,
+          }
+
+          const hostHeader = (req.headers.host || `127.0.0.1:${ctx.webServer.port}`).split(':')[0]
+          const port = ctx.webServer.port
+          const redirectUri = body.redirectUri || `http://${hostHeader}:${port}/mcp-manager/api/oauth/callback`
+          const stateVal = randomBytes(16).toString('hex')
+
+          const { authorizationUrl, codeVerifier } = await startAuthorization(authServerUrl, {
+            metadata: serverInfo.authorizationServerMetadata,
+            clientInformation,
+            redirectUrl: redirectUri,
+            scope: body.scopes?.join(' ') || entry?.oauth?.scopes?.join(' '),
+            state: stateVal,
+          })
+
+          pendingOAuthSessions.set(stateVal, {
+            state: stateVal,
+            serverName: body.serverName,
+            url: targetUrl,
+            codeVerifier,
+            redirectUri,
+            authorizationServerUrl: authServerUrl,
+            metadata: serverInfo.authorizationServerMetadata,
+            clientInformation,
+            createdAt: Date.now(),
+          })
+
+          json(res, 200, {
+            ok: true,
+            authorizationUrl: authorizationUrl.toString(),
+            state: stateVal,
+            redirectUri,
+          })
+          return
+        }
+
+        if (serverName === 'revoke') {
+          const body = JSON.parse(await readBody(req)) as { serverName: string }
+          const entry = findEntry(body.serverName)
+          if (!entry) {
+            json(res, 404, { ok: false, error: `server "${body.serverName}" not found` })
+            return
+          }
+          if (entry.oauth) {
+            delete entry.oauth.tokens
+            saveState(path, state)
+          }
+          await enqueue(entry.serverName, async () => {
+            await disconnectNow(entry.serverName)
+          })
+          json(res, 200, { ok: true, server: await decorateEntry(entry) })
+          return
+        }
       }
 
       if (req.method === 'GET' && action === 'servers' && serverName === undefined) {
@@ -536,7 +869,7 @@ export function apply(ctx: Context): void {
           // Assign only the fields the client actually sent, so flags like
           // `enabled` set through the toggle endpoint are preserved.
           for (const [key, value] of Object.entries(updated)) {
-            if (value !== undefined) (entry as Record<string, unknown>)[key] = value
+            if (value !== undefined) (entry as unknown as Record<string, unknown>)[key] = value
           }
           saveState(path, state)
           // Reconfigure the live connection in place: fiber.update() validates
@@ -555,7 +888,8 @@ export function apply(ctx: Context): void {
             errors.delete(serverName)
             connectingSince.set(serverName, Date.now())
             try {
-              await fiber.update(toMcpConfig(entry))
+              const resolvedHeaders = await resolveEntryHeaders(entry, () => saveState(path, state))
+              await fiber.update(toMcpConfig(entry, resolvedHeaders))
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err)
               errors.set(serverName, message)

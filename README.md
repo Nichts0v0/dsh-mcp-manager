@@ -7,6 +7,7 @@ Manage **MCP servers** right from the DeepSeek Harness Web settings page — add
 ## Features
 
 - **Web settings UI** — a dedicated "MCP Server Manager" page: server cards with live status, an add/edit form, and two-step delete protection.
+- **OAuth 2.0 / RFC 9728 support** — native MCP OAuth 2.1 authorization with PKCE, automated metadata discovery, browser-based login flow, token auto-refresh and management.
 - **Runtime connections** — servers connect/disconnect on the fly; tools are registered globally as `mcp__<serverName>__<tool>` for every session.
 - **Live status** — reachability probing so a closed server shows **offline** instead of a stale "connected"; a stuck connection times out after 30 s.
 - **Auto-reconnect** — a failed initial connect retries with exponential backoff (3 s → 60 s); pressing refresh retries immediately.
@@ -83,12 +84,13 @@ Follow every step, in order:
 
 Open **Settings → MCP Server Manager**:
 
-- **Server cards** show the name, transport, status badge and endpoint; disabled cards are dimmed.
+- **Server cards** show the name, transport, status badge, endpoint and `OAuth` tags; disabled cards are dimmed.
 - **Enable/disable switch** — disabling disconnects immediately and unloads the server's tools.
 - **Reconnect** — waits for the connection result and refreshes automatically (configurable wait, default 15 s).
-- **Edit** — change transport / URL / command / headers (`serverName` is immutable); saving hot-reconfigures the live connection.
+- **Edit** — change transport / URL / command / headers / OAuth settings (`serverName` is immutable); saving hot-reconfigures the live connection.
+- **OAuth authorization** — for `streamable-http` servers requiring authentication, choose `OAuth 2.0`, click **Authorize (OAuth)** to log in via browser popup, and manage token revocation.
 - **Delete** — lives at the top of the edit page, behind a two-step confirm (3 s window).
-- **Add** — `streamable-http` (URL + optional headers) or `stdio` (command + args), with a configurable connection-wait timeout.
+- **Add** — `streamable-http` (URL + optional headers or OAuth 2.0) or `stdio` (command + args), with a configurable connection-wait timeout.
 
 ### Statuses
 
@@ -108,7 +110,28 @@ Open **Settings → MCP Server Manager**:
 {
   "version": 1,
   "servers": [
-    { "serverName": "my-server", "transport": "streamable-http", "url": "http://127.0.0.1:8080/mcp", "enabled": true }
+    {
+      "serverName": "my-http-server",
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "enabled": true
+    },
+    {
+      "serverName": "my-oauth-server",
+      "transport": "streamable-http",
+      "url": "https://api.example.com/mcp",
+      "authType": "oauth",
+      "enabled": true,
+      "oauth": {
+        "clientId": "client-id-123",
+        "scopes": ["read", "write"],
+        "tokens": {
+          "accessToken": "secret_access_token",
+          "refreshToken": "secret_refresh_token",
+          "expiresAt": 1787304425000
+        }
+      }
+    }
   ]
 }
 ```
@@ -128,6 +151,10 @@ The file is **watched live**: manual edits (add / remove / change / enable) take
 | POST | `/mcp-manager/api/servers/<name>/reconnect` | disconnect & reconnect |
 | DELETE | `/mcp-manager/api/servers/<name>` | disconnect & delete |
 | POST | `/mcp-manager/api/reload` | re-read the config file from disk |
+| POST | `/mcp-manager/api/oauth/discover` | probe RFC 9728 OAuth metadata for an MCP URL |
+| POST | `/mcp-manager/api/oauth/start` | generate PKCE authorization URL for browser login |
+| GET | `/mcp-manager/api/oauth/callback` | OAuth redirect callback & token exchange |
+| POST | `/mcp-manager/api/oauth/revoke` | clear saved OAuth credentials and disconnect |
 
 ## Security
 
